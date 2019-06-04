@@ -1,39 +1,44 @@
 #! /usr/bin/env bash
 
-#SBATCH --job-name=3GWf_Fresco
+#   TicDCRiy is a script to automate the FRESCO in silico protein stabilization 
+#   method. This is a poorly tested beta version
+#
+#    Copytight (C) 2017 Maximilian J.L.J. Fürst
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
 
-#SBATCH --time=6-23:59:00
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=24
-#SBATCH --mem=80000
-#SBATCH --partition=nodes
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
 
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# Above: Instructions for the HPC cluster
+######################## Cluter instructions ###########################
+# Here: Instructions for the HPC cluster
 
 ######################## User defined variables ###########################
-rosettaLocation="/Users/max/frescoSoftware/rosetta_bin_mac_2015.25.57927_bundle.tgz"
-foldxLocation="/Users/max//frescoSoftware/FoldX_2016/foldx_MacOs.tar_.gz "
-frescoLocation="/Users/max/Collected_FRESCO/FRESCO_20170718.tar"
-##finalDestination=/data/p273962/1crn_finalfinal/
-#yasaraLocation=/Users/max//frescoSoftware/YASARA.app/
+#rosettaLocation=""
+#foldxLocation=""
+#frescoLocation=""
+#finalDestination=""
+#yasaraLocation=""
 
-#rosettaLocation=/data/p273962/software/rosetta_bin_linux_2015.25.57927_bundle.tgz
+#rosettaLocation=""
 
-#yasaraLocation=/data/p273962/software/yasara
-#foldxLocation=/data/p273962/software/foldx_Linux.tar_.gz
-#frescoLocation=/data/p273962/software/FRESCO_20160322.tar
-
-#pdbLocation=/data/p273962/pdbs/3GWF.pdb
-substrate=FAD
-#keepRes='and !NAP and !FAD'
-#avoidRes="NAP FAD"
+#pdbLocation=""
+#substrate=""
+#keepRes=""
+#avoidRes=""
 
 #processors=24
-
 #nodes=10
 
-#home=/data/p273962/
+#home=""
 
 # Make the script exit when something goes wrong (exit if any statement returns a non-true return value), can be escaped by adding '|| true'
 set -e
