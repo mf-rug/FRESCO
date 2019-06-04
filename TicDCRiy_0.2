@@ -1,0 +1,947 @@
+#! /usr/bin/env bash
+
+#SBATCH --job-name=3GWf_Fresco
+
+#SBATCH --time=6-23:59:00
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=24
+#SBATCH --mem=80000
+#SBATCH --partition=nodes
+
+
+# Above: Instructions for the HPC cluster
+
+######################## User defined variables ###########################
+rosettaLocation="/Users/max/frescoSoftware/rosetta_bin_mac_2015.25.57927_bundle.tgz"
+foldxLocation="/Users/max//frescoSoftware/FoldX_2016/foldx_MacOs.tar_.gz "
+frescoLocation="/Users/max/Collected_FRESCO/FRESCO_20170718.tar"
+##finalDestination=/data/p273962/1crn_finalfinal/
+#yasaraLocation=/Users/max//frescoSoftware/YASARA.app/
+
+#rosettaLocation=/data/p273962/software/rosetta_bin_linux_2015.25.57927_bundle.tgz
+
+#yasaraLocation=/data/p273962/software/yasara
+#foldxLocation=/data/p273962/software/foldx_Linux.tar_.gz
+#frescoLocation=/data/p273962/software/FRESCO_20160322.tar
+
+#pdbLocation=/data/p273962/pdbs/3GWF.pdb
+substrate=FAD
+#keepRes='and !NAP and !FAD'
+#avoidRes="NAP FAD"
+
+#processors=24
+
+#nodes=10
+
+#home=/data/p273962/
+
+# Make the script exit when something goes wrong (exit if any statement returns a non-true return value), can be escaped by adding '|| true'
+set -e
+
+#######################  Determine Terminal or not ########################
+if [ -t 1 ]; then
+    terminal=true
+else
+    terminal=false
+fi
+
+# Everything that's printed to the screen, is also appended to a LogFile
+exec > >(tee FRESCO_logfile)
+
+# To get an idea how long things take, whenever something is printed to the screen, the echo_time alias adds a timestamp
+# And if the output goes to a terminal, print script output in a nice blue color
+BLUE='\033[0;34m'
+BLUE='\e[0;36m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+if [[ $1 == '--slow' ]]; then
+  slowDown=True
+fi
+
+echo_time() {
+    if [[ $terminal == "true" ]]; then
+        echo -e $(date +"%d.%b %T ${BLUE} $* ${NC}")
+        date +"%d.%b %T $*" >> FRESCO_LogFile
+        if [[ $slowDown == 'True' ]]; then
+          sleep 0.4
+        fi
+    else
+        date +"%d.%b %T $*"
+    fi
+}
+
+# this function converts seconds to hours and minutes
+convertsecs() {
+    ((h=${1}/3600))
+    ((m=(${1}%3600)/60))
+    ((s=${1}%60))
+    printf "%02d hours %02d minutes\n" $h $m
+}
+
+# function to visualize the progress of a process and an estimation of the remaining time
+# Usage: show_progress <foldx|rosetta|trajectoryMD|designsMD> <PIDS>
+
+UPLINE=$(tput cuu1)
+ERASELINE=$(tput el)
+show_progress() {
+    prog_pids=$(echo "$@" | cut -d' ' -f2-)
+    prog_folder=$(find ../../../ -maxdepth 5 -type d -name $1)
+    total=0
+    if [[ $1 == foldx ]]; then
+        prog_folder=$prog_folder/Subdirectory?/
+        for file in $prog_folder/individual_list.txt; do
+            total=$((($total + $(wc -l < $file)) *10))
+        done
+        search='*'
+        prog_start=$foldx_start
+    elif  [[ $1 == rosetta ]]; then
+        prog_folder=$prog_folder/Subdirectory?/
+        for file in $prog_folder/List_Mutations_readable.txt; do
+            total=$(($total + $(wc -l < $file)))
+        done
+        search='*'
+        prog_start=$rosetta_start
+    elif [[ $1 == designsMD ]]; then
+        total=$(cat $prog_folder/list_SelectedMutations.tab | sort -n | cut -d' ' -f1 | awk '!x[$0]++' | wc -l)
+        total=$(($total * 5))
+        prog_folder=$prog_folder/NamedPdbFiles/Subdir_*
+        search='*.yob'
+        prog_start=$designsMD_start
+    elif [[ $1 == trajectoryMD ]]; then
+        total=102
+        search="*LSOn*.sim"
+        prog_start=$trajectoryMD_start
+    else
+        echo "Usage: show_progress <foldx|rosetta|trajectoryMD|designsMD>"
+    fi
+    if [[ $(find $prog_folder -type f -name "$search" | wc -l) -lt $total ]]; then
+        echo_time  "[$(printf -- '-%.0s' $(seq 1 50))] 0'%' completed         "
+        echo_time  "Starting calculations.."
+    fi
+    while true; do
+        current=$(find $prog_folder -type f -name "$search" | wc -l)
+        progPercent=$(echo "(($current) / $total)*50" | bc -l)
+        prog_elapsed=$(($(date +"%s") - $prog_start +1))
+        prog_speed=$(echo "$current / $prog_elapsed" | bc -l) #this gives number of files per sec
+        prog_remaining=$(printf %.0f $(echo "($total - $current) / ($prog_speed +0.00001)" | bc -l))
+        if [[ $(printf %.0f $(echo "100*$current/$total" | bc -l)) -lt 3 ]]; then
+            prog_remain_text="Calculating remaining time..             "
+        else
+            prog_remain_text="Estimated remaining time for $1 ($prog_pids): $(convertsecs $prog_remaining)             "
+        fi
+        if [[ $(printf %.0f $(echo "100*$current/$total" | bc -l)) -ne $prog_previous ]]; then
+            echo -en "$UPLINE$ERASELINE$UPLINE$ERASELINE\c"
+            echo_time  "[$(printf '>%.0s' $(seq 1 $progPercent))$(printf -- '-%.0s' $(seq $progPercent 50))] $(printf %.1f $(echo "100*$current/$total" | bc -l))% completed         "
+            echo_time  "$prog_remain_text"
+        fi
+        sleep 1
+        if [[ $1 == "designsMD" ]]; then
+            if [[ $(printf %.0f $(echo "100*$current/$total" | bc -l)) -eq 99 ]]; then
+                break && echo 'Finished!'
+            fi
+            prog_pids="$(ps aux | sed -n '/MultiSeede[a-z]/p' | head -1 | tr -s ' ' | cut -d' ' -f2)"
+        else
+            kill -0 $prog_pids 2>/dev/null || break
+        fi
+        prog_previous=$(printf %.0f $(echo "100*$current/$total" | bc -l))
+    done
+    sleep 10
+    echo
+}
+
+
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+echo_time "Begin: $(date +"%b %d %Y - %T")"
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+
+##############################  Determine OS #############################
+operating_system=$(uname)
+
+if [[ $operating_system == *"Linux"* ]]; then
+    operating_system="Linux"
+elif [[ $operating_system == *"Darwin"* ]]; then
+    operating_system="MacOs"
+else
+    echo_time "Script running on $operating_system, this OS is not supported. Run on Mac or Linux instead. Exiting"
+    exit
+fi
+
+echo_time "Operating system determined: $operating_system"
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+
+
+######################## process user variables ###########################
+if [[ ! -d "$home" ]]; then
+    home=~/
+fi
+
+if [[ ! -d "$yasaraLocation" ]]; then
+    echo_time "Yasara location unspecified or specified is not a valid directory. Searching for Yasara on the system..."
+    echo_time
+    if [[ $operating_system == "Linux" ]]; then
+        yasaraLocation=$(find $home -type d -name "yasara" | head -n 1)
+    elif [[ $operating_system == "MacOs" ]]; then
+        yasaraLocation=$(find $home -type d -name "YASARA*.app" | head -n 1)
+    fi
+
+    if [[ ! -d "$yasaraLocation" ]]; then
+        echo_time "Couldn't find Yasara on the system in all subdirs of $(echo ~), please install first. Exiting"
+        echo_time
+        exit
+    fi
+fi
+
+echo_time "Yasara's Location is $yasaraLocation"
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+
+if [[ $operating_system == "Linux" ]]; then
+    runyasara="${yasaraLocation}/yasara"
+    rosettarelease="ddg_monomer.linuxgccrelease"
+    yasaraPlg=$yasaraLocation/plg/
+else
+    runyasara="${yasaraLocation}/Contents/MacOS/yasara.app"
+    rosettarelease="ddg_monomer.macosclangrelease"
+    yasaraPlg=$yasaraLocation/yasara/plg/
+fi
+
+
+if [[ ! -f "$foldxLocation" ]]; then
+    echo_time "foldx_$operating_sytem.tar_.gz location unspecified or specified is not a valid file path. Searching for "foldx_$operating_system.tar_.gz" on the system..."
+    foldxLocation=$(find $home -type f -name "foldx_${operating_system}.tar_.gz" | head -n 1)
+    if [[ ! -f "$foldxLocation" ]]; then
+        echo_time
+        echo_time "FoldX.tar_.gz location unspecified or specified is not a valid file path."
+        echo_time
+        echo_time "${RED}Enter correct /path/to/foldx_$operating_sytem.tar_.gz:"
+        echo
+        read -e -p "$(date +"%d.%b %R")  $ " foldxLocation
+        echo
+        if [[ ! -f "$foldxLocation" ]]; then
+            echo_time
+            echo_time "foldx_$operating_sytem.tar_.gz location unspecified or specified is not a valid file path. Required. Exiting"
+            echo_time
+            exit
+        fi
+    fi
+fi
+echo_time
+echo_time "FoldX location is $foldxLocation"
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+
+if [[ ! -f "$rosettaLocation" ]]; then
+    echo_time "Rosetta.tgz location unspecified or specified is not a valid file path. Searching on the system..."
+    echo_time
+    rosettaDdgApp=$(find $home -name "$rosettarelease" | head -n 1)
+    if [[ "$rosettaDdgApp" == "" ]] || [[ "$(basename $rosettaDdgApp)" != "$rosettarelease" ]]; then
+        echo_time "Found no Rosetta installation, looking for .tgz file..."
+        echo_time
+        rosettaLocation=$(find $home -type f -name 'rosetta_bin_*_bundle.tgz' | head -n 1)
+        if [[ ! -f "$rosettaLocation" ]]; then
+            echo_time
+            echo_time "Rosetta.tgz location unspecified or specified is not a valid file path."
+            echo_time
+            echo_time "${RED}Enter correct /path/to/Rosetta.tgz:"
+            echo
+            read -e -p "$(date +"%d.%b %R")  $ " rosettaLocation
+            echo
+            if [[ ! -f "$rosettaLocation" ]]; then
+                echo_time
+                echo_time "Rosetta.tgz location unspecified or specified is not a valid file path. Required. Exiting"
+                echo_time
+                exit
+            fi
+        else
+            echo_time
+            echo_time "Rosetta location is $rosettaLocation"
+        fi
+    else
+        echo_time "Found rosetta installed on the system: $rosettaDdgApp"
+        echo_time
+    fi
+fi
+
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+
+if [[ ! -f "$frescoLocation" ]]; then
+    echo_time "FRESCO.tar location unspecified or specified is not a valid file path."
+    echo_time "${RED}Enter correct path to FRESCO.tar"
+    echo
+    read -e -p "$(date +"%d.%b %R")  $ " frescoLocation
+    echo
+    if [[ ! -f "$frescoLocation" ]]; then
+        echo_time
+        echo_time "FRESCO.tar location unspecified or specified is not a valid file path. Required. Exiting"
+        echo_time
+        exit
+    fi
+fi
+echo_time
+echo_time "FRESCO location is $frescoLocation"
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+if [[ ! -d "$finalDestination" ]]; then
+    echo_time "Output folder location unspecified or specified is not a valid directory. Going to use current directory $(pwd)"
+    echo_time
+    finalDestination=$(pwd)/
+else
+    if [[ $finalDestination != */ ]]; then
+        finalDestination=$finalDestination/
+    fi
+    echo_time "Going to use directory $finalDestination as output folder."
+    echo_time
+fi
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+if [[ ! -f "$pdbLocation" ]]; then
+    if [[ $terminal == "true" ]]; then
+        echo_time "No pdb file to work on was specified. "
+        echo_time "${RED}You can enter the four letter code of a pdb file now and I will download it.${BLUE} Hit Enter without input to exit."
+        echo
+        read -e -p "$(date +"%d.%b %R")  $ " pdbDownload
+        echo
+        if [[ "$pdbDownload" =~ [A-Za-z0-9]{4} ]]; then
+            echo_time "Attempting download of $pdbDownload"
+            echo_time
+
+            curl "http://files.rcsb.org/view/$pdbDownload.pdb" > $pdbDownload.pdb || wget "http://www.rcsb.org/pdb/files/$pdbDownload.pdb"
+            pdbLocation=$finalDestination/$pdbDownload.pdb
+        else
+            echo_time "No such pdb file. Exiting."
+            exit
+        fi
+    else
+        echo_time "No pdb file to work on was specified. Exiting"
+        echo_time
+        exit
+    fi
+fi
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+echo_time "File specified as input for FRESCO: $pdbLocation "
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+if [[ -z "$substrate" ]]; then
+    if [[ $terminal == "true" ]]; then
+        echo_time "No substrate was specified."
+        echo_time "Without a defined substrate, I don't know which part of the structure I should avoid for mutations."
+        echo_time "${RED}You can either enter the three letter code for the substrate in the pdb File '(e.g.: NAD)' or a protein residue in the format <threelettercodeAminoAcid><residueNumber>, e.g.: Asp32."
+        echo_time "${BLUE}Hit Enter without input to exit."
+        echo
+        read -e -p "$(date +"%d.%b %R")  $ " substrate
+        echo
+    else
+        echo_time "No substrate was specified. Exiting"
+        echo_time
+        exit
+    fi
+fi
+# substrate search in pdb file requires to have it all in uppercase characters
+substrate=$(echo $substrate | tr '[:lower:]' '[:upper:]')
+sub_exist="false"
+if [[ "$substrate" =~ ^[A-Z]{3}$ ]] || [[ "$substrate" =~ ^[A-Z]{3}[0-9]*$ ]]; then
+    res=${substrate:0:3}
+    num=${substrate:3:${#substrate}}
+    regex="$res [A-Z] *$num"
+    while read line; do
+        if [[ "$line" =~ $regex ]] || [[ "$line" == *"$substrate"* ]]; then
+            sub_exist="true"
+        fi
+    done < $pdbLocation
+    if [[ "$sub_exist" == "false" ]]; then
+        echo_time "Residue $substrate was not found in $pdbLocation."
+        echo_time
+        exit
+    else
+        if [[ "$num" =~ ^[0-9]+$ ]]; then
+            cleanString=" and \!protein Res $num"
+            substrate=$num
+        fi
+        if [[ -n $keepRes ]]; then
+            if [[ $keepRes =~ ((^| and )?\![A-Z]{3})+ ]] && [[ "${#BASH_REMATCH[0]}" == "${#keepRes}" ]] ; then
+                cleanString="$cleanString and $keepRes"
+            else
+                echo_time "Defined variable \$keepRes as $keepRes doesn't fit to format requirements, Ignoring. Use format: !NAP[ and !FAD[ and ...]]"
+            fi
+        fi
+    fi
+else
+    echo_time "No valid substrate was specified. Exiting"
+    echo_time
+    exit
+fi
+
+# If the region to avoid mutation includes multiple Residues these can be defined in variable $avoidRes
+
+echo_time "Substrate in $pdbLocation defined as: $substrate"
+echo_time "Other Residues in $pdbLocation defined as: $avoidRes"
+
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+
+if [[ -z "$processors" ]] || [[ ! "$processors" =~ ^[0-9]*$ ]]; then
+    processors=$(getconf _NPROCESSORS_ONLN)
+    echo_time "Number of processors undefined, going to use all processors on machine: $processors"
+    echo_time
+fi
+if [[ $processors -gt $(getconf _NPROCESSORS_ONLN) ]]; then
+    processors=$(getconf _NPROCESSORS_ONLN)
+    echo_time "The specified number of processors is higher than the number of logical CPUs on this machine. Changing to: $processors"
+    echo_time
+fi
+
+echo_time "Number of processors going to be used for the calculations: $processors"
+echo_time
+
+####################### thereby derived variables #########################
+pdbFile=$(basename $pdbLocation)
+pdbName=${pdbFile%.*}
+pdbCleanName=${pdbName}_cleaned
+pdbCleanFile=${pdbName}_cleaned.pdb
+foldxFile=$(basename $foldxLocation)
+frescoFile=$(basename $frescoLocation)
+
+echo_time "FR++++++++++++++++++++++++++++++++++++++++++++++++++++++CO"
+echo_time "++E+++++F+E+C++F+E+C++FRESCO++++++++F+E+C++F+E+C+++++++S++"
+echo_time "+++S+++++R+S+O++R+S+O++++++++FRESCO++R+S+O++R+S+O+++++E+++"
+echo_time "++++CO++++++++++++++++++++++++++++++++++++++++++++++FR++++"
+echo_time
+echo_time "Welcome to the automated version of FRESCO. Lean back and relax, while I'm doing the job for you."
+echo_time
+echo_time
+
+################# Create directories and copy necessary files #############
+cd "$finalDestination"
+mkdir FRESCO
+cd FRESCO
+mkdir frescoSoftware
+cd frescoSoftware
+#cp -rf "$yasaraLocation" .
+
+
+if [[ ! -n $rosettaDdgApp ]]; then
+    rosettaFile=$(basename $rosettaLocation)
+    rosettaName=${rosettaFile%.*}
+    cp "$rosettaLocation" .
+    echo_time "Extracting rosetta.."
+    tar -xf "$rosettaFile"
+    echo_time
+    rosettaDdgApp=${finalDestination}FRESCO/frescoSoftware/$rosettaName/main/source/bin/$rosettarelease
+fi
+rosettaDatabase=${rosettaDdgApp%%/source*}/database/
+
+echo_time rosetta database at $rosettaDatabase got it from $rosettaDdgApp
+
+mkdir FoldX_2015
+cd FoldX_2015
+cp "$foldxLocation" .
+gunzip "$foldxFile"
+foldxFile=$(basename $foldxFile .gz)
+tar xvf "$foldxFile"
+cd ..
+cp "$frescoLocation" .
+tar -xvf "$frescoFile"
+cd FRESCO
+echo_time
+echo_time "Compiling C programs..."
+echo_time
+gcc -Wall -o DistributeFoldX DistributeFoldX.c
+gcc -Wall -o DistributeRosettaddg DistributeRosettaddg.c
+gcc -Wall -o OverviewDisulfides OverviewDisulfides.c
+
+#################### set number of processor right ########################
+echo_time "Adjusting number of processors specified: $processors"
+echo_time
+
+perl -pi -e "s/PROCESSORS [0-9]*/PROCESSORS $processors/g" MDSimulBackboneSampl.mcr
+perl -pi -e "s/PROCESSORS [0-9]*/PROCESSORS $processors/g" DisulfideDiscovery.mcr
+perl -pi -e "s/PROCESSORS [0-9]*/PROCESSORS $processors/g" MultiSeededMD.mcr
+
+perl -pi -e "s,yasara,$runyasara,g" ./commandRunningDisulfideDesign
+perl -pi -e "s,yasara,$runyasara,g" ./commandRunningMDsimulations
+
+perl -pi -e "s/YourModel_snapshot07_cleaned/$pdbCleanName/g" ./HydrateDesigns.mcr
+
+
+perl -pi -e "s/DelRes \!protein and \!HOH/DelRes \!protein and \!HOH$cleanString/g" ./CleanUp.mcr
+
+perl -pi -e "s,\(AvoidDistance\) from res \(AvoidResidue\),\(AvoidDistance\) from res ${substrate} ${avoidRes},g" ${finalDestination}FRESCO/frescoSoftware/FRESCO/FarEnoughZone.mcr
+
+############ check number of chains and corresponding residues ############
+echo_time "Analyzing pdb file for chains and residues.."
+echo_time
+cd ../..
+mkdir "fresco$pdbName"
+cd "fresco$pdbName"
+cp "$pdbLocation" .
+
+echo_time $runyasara -txt ../frescoSoftware/FRESCO/GetChains.mcr "MacroTarget='$pdbName'"
+
+echo_time
+$runyasara -txt ../frescoSoftware/FRESCO/GetChains.mcr "MacroTarget='$pdbName'"
+chainNum=$(ls -l ResiduesChain?.tab | wc -l)
+
+# Loop through the yasara generated ChainRes.tab
+i=1
+while read line; do
+    o=$((i -1))
+    if [[ "$i" -gt "1" ]]; then
+        set -- $line;
+        chainName[$o]=$3
+        start=$( printf "%.0f" $1 )
+        end=$( printf "%.0f" $2 )
+        if [[ "$o" -eq "1" ]]; then               # The first chain (first monomer) keeps its original start & end number
+            chainStart[$o]=$start
+            chainEnd[$o]=$end
+        else                                      # The subsequent chains get numbers that always continue without leaving a gap
+            chainStart[$o]=$((${chainEnd[o -1]} +1))
+            chainEnd[$o]=$((${chainEnd[o -1]} +1 + ($end - $start)))
+        fi
+    fi
+    i=$((i +1))
+done < ChainRes.tab
+
+echo_time "Number of chains in $pdbFile: $chainNum "
+
+echo_time
+
+
+# A file is created for each chain with all the residues, make sure they are sorted
+for file in ResiduesChain?.tab; do
+    sort -n $file > tmp_file && mv tmp_file $file
+done
+
+# Now combine all the files to one file where the number of occurences of each residue is added
+sort -mn ResiduesChain?.tab | uniq -c > ResidueOccurenceList.tab
+
+# Loop through this file to find Residues that occur less than the number of chains, store them in a variable
+nonConstantRes=""
+while read line; do
+   set -- $line
+   if [[ "$1" -ne "$chainNum" ]]; then
+        nonConstantRes="$nonConstantRes $2"
+        echo_time "Found unique residue: Residue $2 doesn't occur $chainNum times"
+        echo_time
+   fi
+done < ResidueOccurenceList.tab
+
+if [[ -z "$nonConstantRes" ]]; then
+    nonConstantRes="0"
+fi
+
+echo_time "Will delete Residues $nonConstantRes for Rosetta file..."
+echo_time
+echo_time $runyasara -txt ../frescoSoftware/FRESCO/CleanUp.mcr "MacroTarget='$pdbName'" "DelResidues='$nonConstantRes'" "ResidueOne='${chainStart[1]}'"
+$runyasara -txt ../frescoSoftware/FRESCO/CleanUp.mcr "MacroTarget='$pdbName'" "DelResidues='$nonConstantRes'" "ResidueOne='${chainStart[1]}'"
+
+echo_time $runyasara -txt ../frescoSoftware/FRESCO/CleanUp2.mcr "MacroTarget='$pdbName'" "DelResidues='$nonConstantRes'" "ResidueOne='${chainStart[1]}'"
+$runyasara -txt ../frescoSoftware/FRESCO/CleanUp2.mcr "MacroTarget='$pdbName'" "DelResidues='$nonConstantRes'" "ResidueOne='${chainStart[1]}'"
+
+i=1
+while read line; do
+    if [[ $i -eq 1 ]]; then
+        Rosi_first=$line
+    else
+        Rosi_last=$line
+    fi
+    i=$((i +1))
+done < FirstLast.tab
+
+# The variables below will be used in the commands that start foldx and rosetta and define the parameters of chains and start and end
+chainsRosetta="$chainNum ${chainName[0]}"
+chainsFoldx="$chainNum"
+for i in $(seq 1 $chainNum); do
+    num=$((((($i * ($Rosi_last - $Rosi_first)) - ($Rosi_last - $Rosi_first)) + $Rosi_first)))
+    chainsRosetta="$chainsRosetta ${chainName[$i]} $num"
+    chainsFoldx="$chainsFoldx ${chainName[$i]}"
+done
+
+###################### Create the remaining files and dirs #####################
+mkdir LOGS
+mkdir disulfides
+mkdir ./disulfides/trajectoryMD
+cp "$pdbCleanFile" ./disulfides/trajectoryMD/
+cp ../frescoSoftware/FRESCO/MDSimulBackboneSampl.mcr ./disulfides/trajectoryMD/
+mkdir foldx
+cd foldx
+cp ../$pdbCleanFile .
+cp ../../frescoSoftware/FRESCO/DistributeFoldX .
+cp ../../frescoSoftware/FRESCO/HydrateDesigns.mcr .
+cp ../../frescoSoftware/FoldX_2015/foldx .
+cp ../../frescoSoftware/FoldX_2015/rotabase.txt .
+cd ..
+mkdir rosetta
+cd rosetta
+cp ../${pdbName}_renum.pdb .
+cp ../${pdbName}_forRosetta.pdb .
+cp ../../frescoSoftware/FRESCO/FLAGrow3 .
+cp ../../frescoSoftware/FRESCO/DistributeRosettaddg .
+perl -pi -e "s,-database -databas.*,-database -database $rosettaDatabase,g" FLAGrow3
+cd ..
+mkdir designsMD
+
+################################ Start FoldX ##################################
+echo_time "Creating table for residues to avoid mutating..."
+echo_time
+
+echo $runyasara -txt ${finalDestination}FRESCO/frescoSoftware/FRESCO/FarEnoughZone.mcr "MacroTarget = '${pdbName}_renum'" "AvoidResidue = '${substrate}'" "AvoidDistance = 5"
+sleep 2
+$runyasara -txt ${finalDestination}FRESCO/frescoSoftware/FRESCO/FarEnoughZone.mcr "MacroTarget = '${pdbName}_renum'" "AvoidResidue = '${substrate}'" "AvoidDistance = 5"
+$runyasara -txt ${finalDestination}FRESCO/frescoSoftware/FRESCO/FarEnoughZone.mcr "MacroTarget = '${pdbName}'" "AvoidResidue = '${substrate}'" "AvoidDistance = 5"
+
+
+cp ${pdbName}_renum_MoreThan5AngstromFrom${substrate}.tab ./rosetta/
+cp ${pdbName}_MoreThan5AngstromFrom${substrate}.tab ./foldx/
+
+cd foldx
+
+echo_time "Starting FoldX Phase 1: "
+echo_time
+echo_time "./DistributeFoldX Phase1 "$pdbCleanName" $chainsFoldx ${pdbName}_MoreThan5AngstromFrom${substrate}.tab 1000 ../foldx"
+sleep 2
+./DistributeFoldX Phase1 "$pdbCleanName" $chainsFoldx ${pdbName}_MoreThan5AngstromFrom${substrate}.tab 1000 ../foldx
+
+# This will re-occur later and creates shortcuts to all the log-files created in a separate folder, for easy access
+dirs="./Subdirectory?/"
+i=1
+for dir in $dirs; do
+    ln -s $dir/LOG ../LOGS/foldx_Subdirectory${i}_LOG
+    i=$((i+1))
+done
+
+# This re-occurs later and adds lines to the todolist to make sure the process IDs of the started calculations is stored
+
+########### foldx3b6 #############
+# awk '/-runfile run/{print;print "pids=\"$pids $!\"";next}1' todolist > tmpfile && mv tmpfile todolist && echo 'echo $pids > WaitForThesePIDs.txt' >> todolist
+########### foldx4 old DistributeFoldx #############
+# awk '/-runfile run/{print "../foldx --command=BuildModel --pdb=$pdbCleanFile  --mutant-file=individual_list.txt --numberOfRuns=5 >LOG&";print "pids=\"$pids $!\"";next}1' todolist > tmpfile && mv tmpfile todolist && echo 'echo $pids > WaitForThesePIDs.txt' >> todolist
+# echo "pdbCleanFile=$pdbCleanFile" | cat - todolist > tmpfile && mv tmpfile todolist
+########### foldx4 new DistributeFoldx #############
+awk '/BuildModel/{print;print "pids=\"$pids $!\"";next}1' todolist > tmpfile && mv tmpfile todolist && echo 'echo $pids > WaitForThesePIDs.txt' >> todolist
+###########################################
+
+chmod +x todolist
+./todolist
+foldx_start=$(date +"%s")
+
+################################## rosetta ####################################
+cd ../rosetta
+
+echo_time "Starting rosetta Phase 1: "
+echo_time
+
+echo_time ./DistributeRosettaddg Phase1 ${pdbName}_renum_MoreThan5AngstromFrom${substrate}.tab $chainsRosetta ${pdbName}_forRosetta.pdb 4000 FLAGrow3 $rosettaDdgApp
+sleep 2
+./DistributeRosettaddg Phase1 ${pdbName}_renum_MoreThan5AngstromFrom${substrate}.tab $chainsRosetta ${pdbName}_forRosetta.pdb 4000 FLAGrow3 $rosettaDdgApp
+
+dirs="./Subdirectory?/"d
+i=1
+for dir in $dirs; do
+    ln -s $dir/LOG ../LOGS/rosetta_Subdirectory${i}_LOG
+    i=$((i+1))
+done
+
+awk '/ddg_monomer/{print;print "pids=\"$pids $!\"";next}1' todolist > tmpfile && mv tmpfile todolist && echo 'echo $pids > WaitForThesePIDs.txt' >> todolist
+chmod +x todolist
+./todolist
+rosetta_start=$(date +"%s")
+
+############################# Start MD Simulation #############################
+cd ../disulfides/trajectoryMD/
+
+# Make yasara use all processors available minus the amount of processes started for foldx and rosetta (This could be done better)
+# Done by counting the number of occurences of ">LOG" (that is the end of each ./foldx and ./rosetta command) in the todolist files
+processorsLeftForYasara=$(($processors - $(sed -n -e '/>LOG/p' ../../*/todolist | wc -l)))
+if [[ ! $processorsLeftForYasara -gt 0 ]]; then
+    processorsLeftForYasara=1
+fi
+echo_time "Processors Yasara is going to use for MD: $processorsLeftForYasara"
+perl -pi -e "s/PROCESSORS $processors/PROCESSORS $processorsLeftForYasara/g" MDSimulBackboneSampl.mcr
+
+ln -s ./LOG_MD ../../LOGS/trajectoryMD_LOG
+
+echo_time "Starting MD simulation of $pdbCleanName"
+echo_time
+echo_time "$runyasara -txt MDSimulBackboneSampl.mcr \"MacroTarget = '$pdbCleanName'\" > LOG_MD&"
+sleep 2
+$runyasara -txt MDSimulBackboneSampl.mcr "MacroTarget='$pdbCleanName'" > LOG_MD&
+trajectoryMD_start=$(date +"%s")
+
+# Yasara was just started, it's process ID is now stored in the special bash variable $!
+mdpid=$!
+
+rosettapids="$(head -n 1 ../../rosetta/WaitForThesePIDs.txt)"
+foldxpids="$(head -n 1 ../../foldx/WaitForThesePIDs.txt)"
+allpids="$(head -n 1 ../../rosetta/WaitForThesePIDs.txt) $(head -n 1 ../../foldx/WaitForThesePIDs.txt)"
+
+echo_time "Started MD, FoldX and Rosetta. Allocated PIDs: $allpids $mdpid"
+echo_time
+echo_time "Waiting for MD to finish. Allocated PID: $mdpid"
+echo_time
+# This Loop will check every minute, if the process IDs stored earlier are still running and not continue until they stopped.
+
+if [[ $terminal == "true" ]]; then
+    show_progress trajectoryMD $mdpid 2>/dev/null
+else
+    while kill -0 $mdpid; do
+        sleep 60
+    done
+fi
+
+echo_time MD finished.
+
+######################### Disulfide Bond discovery #########################
+cd ..
+mkdir all_designs
+cp ../$pdbCleanFile ./all_designs/
+cp trajectoryMD/*ps.pdb ./all_designs/
+cp ../${pdbName}_MoreThan5AngstromFrom${substrate}.tab ./all_designs/
+cp ../../frescoSoftware/FRESCO/DisulfideDiscovery.mcr ./all_designs/
+cp ../../frescoSoftware/FRESCO/OverviewDisulfides ./all_designs/
+cp ../../frescoSoftware/FRESCO/commandRunningDisulfideDesign ./all_designs/
+cd all_designs
+
+echo_time
+echo_time "Starting disulfide bond calculations..."
+echo_time
+echo_time "./commandRunningDisulfideDesign"
+echo_time
+./commandRunningDisulfideDesign
+
+ln -s ./LOG ../../LOGS/disulfides_LOG
+
+./todolist
+
+echo_time "Finished Disulfide Designs. Waiting for FoldX and Rosetta Phase 1. Allocated PIDs: FoldX $foldxpids, rosetta $rosettapids"
+echo_time
+
+# This Loop will check every minute, if the process IDs stored earlier are still running and not continue until they stopped.
+
+if [[ $terminal == "true" ]]; then
+    show_progress rosetta $rosettapids
+    show_progress foldx $foldxpids
+else
+    for pid in $rosettapids; do
+        while kill -0 $pid; do
+            sleep 60
+        done
+    done
+    echo_time "Rosetta finished."
+    for pid in $foldxpids; do
+        while kill -0 $pid; do
+            sleep 60
+        done
+    done
+    echo_time "FoldX finished."
+fi
+
+echo_time
+echo_time ./OverviewDisulfides
+sleep 2
+./OverviewDisulfides
+cp -r UniqueDisulfides ../../designsMD/ || true
+cp BestEnergyUniqueDisulfideBonds.tab ../../designsMD/ || true
+cd ../../rosetta
+
+######################## Rosetta and FoldX Phase 2 ##########################
+echo_time
+echo_time "Starting Rosetta Phase 2: "
+echo_time ./DistributeRosettaddg Phase2 ${pdbName}_renum_MoreThan5AngstromFrom${substrate}.tab $chainsRosetta ${pdbName}_forRosetta.pdb 4000 -5
+sleep 2
+./DistributeRosettaddg Phase2 ${pdbName}_renum_MoreThan5AngstromFrom${substrate}.tab $chainsRosetta ${pdbName}_forRosetta.pdb 4000 -5
+cd ../foldx
+
+echo_time
+echo_time "Starting FoldX Phase 2: "
+echo_time ./DistributeFoldX Phase2 "$pdbCleanName" $chainsFoldx ${pdbName}_MoreThan5AngstromFrom${substrate}.tab 1000 -5
+sleep 2
+./DistributeFoldX Phase2 "$pdbCleanName" $chainsFoldx ${pdbName}_MoreThan5AngstromFrom${substrate}.tab 1000 -5
+
+
+####################################################################################################################################################
+####################### Store the information which new residuenumber corresponds to which original residuenumber###################################
+cd ..
+
+getvalue() {
+  lookfor=$1
+  infile=$2
+  while read line; do
+    set -- $line
+    if [[ $1 == "$lookfor" ]]; then
+      echo $2
+    fi
+  done < $infile
+}
+
+paste ${pdbName}_renum_MoreThan5AngstromFrom${substrate}.tab ${pdbName}_MoreThan5AngstromFrom${substrate}.tab | awk '{print $3,$6}' > new_orig_resnum.tab
+
+i=1
+while read line; do
+  if [[ $i == 1 ]]; then
+    ((i=i+1))
+    echo $line | tee new_old_conversion_log NEW_MutationsEnergies_BelowCutOff.tab >/dev/null
+    continue
+  fi
+  newmut=$(echo $line | cut -f1 -d' ' | sed 's/^.//' | sed 's/.$//');
+  oldmut=$(getvalue $newmut new_orig_resnum.tab);
+  echo "$line" >> new_old_conversion_log
+  echo "${line/$newmut/$oldmut}" | tee -a new_old_conversion_log NEW_MutationsEnergies_BelowCutOff.tab >/dev/null
+  echo "----------------" >> new_old_conversion_log
+done < ./rosetta/MutationsEnergies_BelowCutOff.tab
+
+cp ./rosetta/MutationsEnergies_BelowCutOff.tab './rosetta/OLD_NUMBERING_(original)_MutationsEnergies_BelowCutOff.tab'
+mv NEW_MutationsEnergies_BelowCutOff.tab ./rosetta/MutationsEnergies_BelowCutOff.tab
+
+cd foldx
+####################################################################################################################################################
+
+
+cat MutationsEnergies_BelowCutOff.tab > list_SelectedMutations.tab && tail -n +2 ../rosetta/MutationsEnergies_BelowCutOff.tab >> list_SelectedMutations.tab
+
+echo_time "Re-adding water to the pdb..."
+echo_time
+ln -s ./log_conversion ../LOGS/PDB_conversion_LOG
+perl -pi -e "s/TotalSubdirectories = *[0-9]*/TotalSubdirectories = $(find . -maxdepth 1 -type d -name "Subdirectory*" | wc -l)/g" ./HydrateDesigns.mcr
+perl -pi -e "s/DELRES OBJ 2 RES \!HOH/DELRES OBJ 2 RES \!HOH $keepRes/g" ./HydrateDesigns.mcr
+
+
+echo_time "$runyasara -txt HydrateDesigns.mcr \"BasicName = '$pdbCleanName'\" \"HydrationShellFrom = '$pdbCleanName'\"  > log_conversion"
+sleep 2
+$runyasara -txt HydrateDesigns.mcr "BasicName = '$pdbCleanName'" "HydrationShellFrom = '$pdbCleanName'"  > log_conversion
+
+########################### MD simulations of mutants #############################
+cp -r NamedPdbFiles ../designsMD/
+cp list_SelectedMutations.tab ../designsMD/
+cd ../designsMD/
+cp ../../frescoSoftware/FRESCO/commandRunningMDsimulations .
+cp ../../frescoSoftware/FRESCO/MultiSeededMD.mcr .
+cp ../$pdbCleanFile .
+cp ../../frescoSoftware/FRESCO/InspectDynamicStructuresMutantVariants.mcr .
+cp ../../frescoSoftware/FRESCO/MutantInspectPlugin.py $yasaraPlg
+
+
+echo_time
+echo_time "Going to start MD simulation of all Mutants:"
+echo_time "./commandRunningsMDsimulations"
+
+ln -s ./log_MD ../LOGS/MD_mutants_LOG
+
+./commandRunningMDsimulations
+
+
+designsMD_start=$(date +"%s")
+sinfo -V 2>/dev/null || cluster=false
+
+# If on the cluster, split the todolist in N lists (N defined above via $nodes) that each get a Cluster header,
+# an "if" to check whether the MD already finished (good for resuming a failed job) and an echo_time statement showing progress after each MD
+if [[ ! $cluster == "false" ]]; then
+    echo_time "As we're on the cluster I'm going to split the mutant MD todolist"
+    if [[ -z $nodes ]]; then
+        nodes=5
+    fi
+    echo_time "Going to distribute tasks to $nodes nodes."
+    sed -n '/MultiSeededMD/p' todolist > tmp_list && mv tmp_list todolist
+    splitfile=todolist
+    lines=$(wc -l < $splitfile)
+    splitlines=$(($lines / $nodes))
+    remainder=$(($lines % $nodes))
+    i=1
+    o=0
+    while [[ "$i" -le "$nodes" ]]; do
+        if [[ $i == "$nodes" ]]; then
+            num=$(($splitlines + remainder))
+            o=$((o + $num))
+        else
+            o=$((o + $splitlines))
+        fi
+        start=$(($o - $splitlines +1))
+        echo '#! /usr/bin/env bash' > ${splitfile}_part_$i
+        echo "#SBATCH --job-name=${pdbName}_$i" >> ${splitfile}_part_$i
+        echo '#SBATCH --time=5-23:59:00' >> ${splitfile}_part_$i
+        echo '#SBATCH --nodes=1' >> ${splitfile}_part_$i
+        echo '#SBATCH --ntasks-per-node=24' >> ${splitfile}_part_$i
+        echo '#SBATCH --mem=40000' >> ${splitfile}_part_$i
+        echo '#SBATCH --partition=nodes' >> ${splitfile}_part_$i
+        echo 'module load libXdmcp/1.1.2-foss-2016a' >> ${splitfile}_part_$i
+        echo "echo Starting MD of mutants.. part $i" >> ${splitfile}_part_$i
+        echo "cd $finalDestination/FRESCO/fresco$pdbName/designsMD/" >> ${splitfile}_part_$i
+        sed -n "$start,${o}p; $(($o +1))q" $splitfile >> ${splitfile}_part_$i
+        i=$(($i +1))
+    done
+    for list in ${splitfile}_part*; do
+        u=1
+        mdruns=$(cat $list | grep -o "MultiSeededMD" | wc -l | tr -d ' ')
+        while read line; do
+            if [[ $line =~ "MultiSeededMD.mcr" ]]; then
+                if [[ $line =~ "NamedPdbFiles" ]]; then
+                    echo 'if [[ ! $(find ./NamedPdbFiles/'$([[ $line =~ NamedPdbFiles.([^/]*) ]] && echo ${BASH_REMATCH[1]})" -type f -name '"'*.yob'"'"' | wc -l) -eq 5 ]]; then'
+                fi
+                echo "    $line"
+                echo 'fi'
+                echo 'echo $(date +"%d.%b %T") Progress: '$u / $mdruns MDs done.
+                u=$((u +1))
+            else
+                echo "$line"
+            fi
+        done < $list > tmp_file && mv tmp_file $list
+        sbatch $list
+    done
+else
+    show_progress designsMD "$(ps aux | sed -n '/MultiSeeded/p' | head -1 | tr -s ' ' | cut -d' ' -f2)"&
+    ./todolist
+fi
+echo_time
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+echo_time "Congratulations! You successfully made it through the first part of the FRESCO procedure!"
+echo_time
+echo_time "Continue FRESCO by visually inspecting the Mutants."
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time
+echo_time "The Plugin for the Inspection has been copied in the /plg/ folder in $yasaraLocation"
+echo_time
+echo_time "Exiting."
+echo_time
+echo_time
+echo_time
+echo_time End: $(date +"%b %d %Y - %T")
+echo_time
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+echo_time "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++"
+exit
+
+######################################################################################################################
+###################################
+######### copying relevant data ###################################################
+cd $finalDestination/FRESCO/
+mkdir compressed
+cd compressed
+mkdir fresco$pdbName
+cd fresco$pdbName
+cp ../../fresco$pdbName/* .
+mkdir designsMD
+cp ../../fresco$pdbName/designsMD/* designsMD/
+find ../../fresco$pdbName/designsMD/NamedPdbFiles/Subdir_* -name '*.pdb' | cpio -pdm designsMD/
+find ../../fresco$pdbName/designsMD/NamedPdbFiles/Subdir_* -name '*.yob' | cpio -pdm designsMD/
+find ../../fresco$pdbName/designsMD/UniqueDisulfides/Subdir_* -name '*.pdb' | cpio -pdm designsMD/
+find ../../fresco$pdbName/designsMD/UniqueDisulfides/Subdir_* -name '*.yob' | cpio -pdm designsMD/
+
+
