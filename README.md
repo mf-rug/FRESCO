@@ -1,6 +1,6 @@
 The folder structure from the TicDCRiy script is identical to the one you get if you follow all the commands in [our paper](https://link.springer.com/protocol/10.1007/978-1-4939-7366-8_5) and is essential to make the YASARA plugin for the mutant inspection work. The structure should be like this:
 
-
+```
 frescoXXXX
   |
   |___designsMD
@@ -32,3 +32,4 @@ frescoXXXX
                |___Subdir_templates
                |
                ...
+```
